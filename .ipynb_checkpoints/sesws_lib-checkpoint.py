@@ -18,38 +18,38 @@ from tqdm.notebook import tqdm            # progress bar (for jupyter, if you us
 #import vk4_analysis as vk
 
 class Gen_SuperEllipse:
-        """
-        Class for the tutorial of super sllipse
-        1. Contour_SuperEllipse
-            Make a single super ellipse contour given parameters
-            parameters:
-                rx: radius in x (int, float)
-                ry: radius in y (int, float)
-                nx: index of super ellipse in x (int, float)
-                ny: index of super ellipse in y (int, float)
-            return 
-                x, y in parametric display (1-D numpy array)
-        
-        2. Contour_SuperEllipse_arr
-            Make superllipse contours given parameter arrays
-            parameters:
-                rx_arr: radius in x (1-D numpy array)
-                ry_arr: radius in y (1-D numpy array)
-                nx_arr: index of super ellipse in x (1-D numpy array)
-                ny_arr: index of super ellipse in y (1-D numpy array)
-            return
-                x_arr, y_arr in parametric display (2-D numpy array)
-                
-        3. Plot_Contour_SuperEllipse
-            Plot contour super ellise given array
-            parameters:
-                x_arr: x array in parametric display (2-D numpy array)
-                y_arr: y array in parametric display (2-D numpy array)
-                nx_arr: index of super ellipse in x (1-D numpy array)
-                ny_arr: index of super ellipse in y (1-D numpy array)
-                sname: name for saving the figure (string), saved in ./Figure directry
-            return:     
-        """
+    """
+    Class for the tutorial of super sllipse
+    1. Contour_SuperEllipse
+        Make a single super ellipse contour given parameters
+        parameters:
+            rx: radius in x (int, float)
+            ry: radius in y (int, float)
+            nx: index of super ellipse in x (int, float)
+            ny: index of super ellipse in y (int, float)
+        return 
+            x, y in parametric display (1-D numpy array)
+
+    2. Contour_SuperEllipse_arr
+        Make superllipse contours given parameter arrays
+        parameters:
+            rx_arr: radius in x (1-D numpy array)
+            ry_arr: radius in y (1-D numpy array)
+            nx_arr: index of super ellipse in x (1-D numpy array)
+            ny_arr: index of super ellipse in y (1-D numpy array)
+        return
+            x_arr, y_arr in parametric display (2-D numpy array)
+
+    3. Plot_Contour_SuperEllipse
+        Plot contour super ellise given array
+        parameters:
+            x_arr: x array in parametric display (2-D numpy array)
+            y_arr: y array in parametric display (2-D numpy array)
+            nx_arr: index of super ellipse in x (1-D numpy array)
+            ny_arr: index of super ellipse in y (1-D numpy array)
+            sname: name for saving the figure (string), saved in ./Figure directry
+        return:     
+    """
     def __init__(self):
         self.dpoint = 1001
         self.theta = np.linspace(0,2*np.pi,self.dpoint)
@@ -119,7 +119,129 @@ class Gen_SuperEllipse:
         plt.close()
         
         
+class Gen_SuperEllipse_z:
+    """
+    class for the tutorial of super sllipse including z dependence
+    1. SuperEllipse_zdep
+            Make contour of super ellipse for each depth with z_num
+            parameters:
+                z_num: number of depth (int)
+                rx_arr: radius in x (1-D numpy array)
+                ry_arr: radius in y (1-D numpy array)
+                nx_arr: index of super ellipse in x (1-D numpy array)
+                ny_arr: index of super ellipse in y (1-D numpy array)
+                p: pitch of the structure (int, float, in [mm])
+            return: x_arr, y_arr in parametric display (2-D numpy array)
+    2.Plot_Contour_SuperEllipse_z
+            Plot contour super ellise, radius and index of super ellipse given arrays
+            parameters:
+                z_arr: depth array (1-D numpy array)
+                x_arr: x array in parametric display (2-D numpy array)
+                y_arr: y array in parametric display (2-D numpy array)
+                nx_arr: index of super ellipse in x (1-D numpy array)
+                ny_arr: index of super ellipse in y (1-D numpy array)
+                sname: name for saving the figure (string), saved in ./Figure directry
+            return: 
+    """
+    def __init__(self):
+        self.dpoint = 1001
+        self.theta = np.linspace(0,2*np.pi,self.dpoint)
         
+    def SuperEllipse_zdep(self,z_num,rx_arr,ry_arr,nx_arr,ny_arr,p):
+        """
+        SuperEllipse_zdep
+            Make contour of super ellipse for each depth with z_num
+            parameters:
+                z_num: number of depth (int)
+                rx_arr: radius in x (1-D numpy array)
+                ry_arr: radius in y (1-D numpy array)
+                nx_arr: index of super ellipse in x (1-D numpy array)
+                ny_arr: index of super ellipse in y (1-D numpy array)
+                p: pitch of the structure (int, float, in [mm])
+            return: x_arr, y_arr in parametric display (2-D numpy array)
+        """
+        x_arr = np.zeros([z_num,self.dpoint])
+        y_arr = np.zeros([z_num,self.dpoint])
+        for i in range(0,z_num):
+            x = rx_arr[i] * np.sign(np.cos(self.theta))*abs(np.cos(self.theta))**(2/nx_arr[i]) # rx (array to make contour)
+            y = ry_arr[i] * np.sign(np.sin(self.theta))*abs(np.sin(self.theta))**(2/ny_arr[i]) # ry (array to make contour)
+            x_arr[i] = x
+            y_arr[i] = y
+            
+            x_arr[i,np.where(x_arr[i] >=  p/2)] = p/2
+            x_arr[i,np.where(x_arr[i] <= -p/2)] = -p/2
+            y_arr[i,np.where(y_arr[i] >=  p/2)] = p/2
+            y_arr[i,np.where(y_arr[i] <= -p/2)] = -p/2
+        return x_arr,y_arr
+    
+    def Plot_Contour_SuperEllipse_z(self,z_arr,rx_arr,ry_arr,x_arr,y_arr,nx_arr,ny_arr,sname):
+        """
+        Plot_Contour_SuperEllipse_z
+            Plot contour super ellise, radius and index of super ellipse given arrays
+            parameters:
+                z_arr: depth array (1-D numpy array)
+                rx_arr: radius in x (1-D numpy array)
+                ry_arr: radius in y (1-D numpy array)
+                x_arr: x array in parametric display (2-D numpy array)
+                y_arr: y array in parametric display (2-D numpy array)
+                nx_arr: index of super ellipse in x (1-D numpy array)
+                ny_arr: index of super ellipse in y (1-D numpy array)
+                sname: name for saving the figure (string), saved in ./Figure directry
+            return:   
+        """
+        fig = plt.figure(figsize = (15,8))
+        gs = GridSpec(2,5)
+
+        ss1 = gs.new_subplotspec((0,0),rowspan = 2,colspan = 2)  # contour
+        ss2 = gs.new_subplotspec((0,2),colspan = 3)              # radius (taper)
+        ss3 = gs.new_subplotspec((1,2),colspan = 3)              # index (taper)
+        
+        ax1 = plt.subplot(ss1) # contour
+        ax2 = plt.subplot(ss2) # radius (taper)
+        ax3 = plt.subplot(ss3) # index (taper)
+        
+        # =========================================
+        # Contour-like plot
+        # - - - - - - - - - - - - - - - - - - - - -       
+        x_arr_r = x_arr[::-1]
+        y_arr_r = y_arr[::-1]
+        for ai in range(0,len(x_arr)):
+            ax1.plot(x_arr_r[ai],y_arr_r[ai],color = cm.jet(ai/len(x_arr)),label = '$n_x=%s$'%nx_arr[ai]+', $n_y=%s$'%ny_arr[ai])
+        ax1.set_aspect('equal')
+        ax1.grid(True)
+        ax1.set_xlabel('$x$ [mm]',fontsize = 12)
+        ax1.set_ylabel('$y$ [mm]',fontsize = 12)
+        # - - - - - - - - - - - - - - - - - - - - - 
+        # =========================================
+        
+        # =========================================
+        # Radius [mm]
+        # - - - - - - - - - - - - - - - - - - - - -          
+        ax2.plot(z_arr,rx_arr,'b',label = '$r_x$')
+        ax2.plot(z_arr,ry_arr,'r',label = '$r_y$')
+        ax2.legend()
+        ax2.grid(True)
+        ax2.set_xlabel('Depth [mm]',fontsize =12)
+        ax2.set_ylabel('Radius [mm]',fontsize = 12)
+        # - - - - - - - - - - - - - - - - - - - - - 
+        # =========================================
+        
+        # =========================================
+        # Index of Super ellipse
+        # - - - - - - - - - - - - - - - - - - - - -          
+        ax3.plot(z_arr,nx_arr,'b',label = '$r_x$')
+        ax3.plot(z_arr,ny_arr,'r',label = '$r_y$')
+        ax3.legend()
+        ax3.grid(True)
+        ax3.set_xlabel('Depth [mm]',fontsize =12)
+        ax3.set_ylabel('Index of SE',fontsize = 12)
+        # - - - - - - - - - - - - - - - - - - - - - 
+        # =========================================
+        
+        fig.tight_layout()
+        plt.savefig('./Figure/'+sname)
+        plt.show()
+        plt.close()        
         
 
 
