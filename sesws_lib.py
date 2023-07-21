@@ -4,14 +4,25 @@ import matplotlib.cm as cm                # color gradation
 from matplotlib.gridspec import GridSpec  # for summary plot
 from mpl_toolkits.mplot3d import axes3d   # for 3D object of super-ellipse SWS
 
+import cv2                                # To find the contour of each slice
+
 
 import scipy.special as special           # for modeling klopfenstein
 import scipy.integrate as integrate       # for moleling klopfenstein
+import scipy.ndimage as ndi               # To what?? maybe fine to remove
 from scipy.special import gamma           # for modeling klopfenstein
+from scipy.optimize import curve_fit      # To fit the contour of each slice
 
 from glob import glob                     # get filename
 from natsort import natsorted             # sort files
 from tqdm.notebook import tqdm            # progress bar (for jupyter, if you use local .py you may need to remove ".notebook")
+
+
+import binascii
+import ipywidgets as widgets
+
+
+
 
 
 #import matplotlib.ticker as ticker        
@@ -241,7 +252,648 @@ class Gen_SuperEllipse_z:
         fig.tight_layout()
         plt.savefig('./Figure/'+sname)
         plt.show()
-        plt.close()        
+        plt.close()  
+        
+
+
+class Design_SWS:
+    def __init__(self):
+        # ==========================
+        # Constants
+        # - - - - - - - - - - - - - - -
+        self.mu = 1.25663706e-06  # vacuum permeability [m kg s-2 A-2]
+        self.ep0 = 8.8542e-12     # vacuum permitivity [m-3 kg-1 s4 A2]
+        self.c = 2.9979e+08       # speed of light [m/s]
+        self.pi = np.pi           # pi
+        # - - - - - - - - - - - - - - -
+        # ==========================
+        
+    def Klopfenstein(self,h,num,ni,ns,Gamma):
+        '''
+        * Def name
+            Klopfenstein
+        * Description
+            Calculate Klofenstein index profile
+            Based on two papers:
+                1: Klopfenstein(1956):https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=4051841
+                2: Grann et al(1995): https://opg.optica.org/view_article.cfm?pdfKey=fbf947c3-8dd3-440b-bfe51c58d6e98f89_33114
+        * input parameters
+            - h:   height of the taper along z axis [arbitral unit]
+            - num: number of layer (as same as resolution of depth of SWS)
+            - ni:  refractive index of air, so 1.0
+            - ns:  refractive index of substrate
+            - Gamma: important parameter to control the trade-off between the ripple in the opera- tion bands and bandwidth
+
+        * return
+            - n_arr: Klopfenstein index profile
+            - z_arr: array of depth (height)
+            - z_space: array of thickness each layer
+        '''
+        z_arr = np.linspace(0,h,num)            # define array of depth (height)
+        n_arr = np.zeros(num)                   # set array of Klopfenstein index profile
+        z_space = np.ones(len(z_arr))*(h/num)   # calculate array of thickness each layer
+        rho_0 = 0.5*np.log(ns/ni)               # calcualte rho_0(see Klopfenstein(1956))
+        A = np.arccosh(rho_0/Gamma)             # calculate A(see Klopfenstein(1956))
+        
+        # Calculate Klopfenstein index profile 
+        # (see Eq.12 in Klopfenstein(1956), and Eq.6 in Grann et al(1995))
+        for i in range(0,num):
+            x_i = 2.*z_arr[i]/h-1.
+            phi_int = integrate.quad(lambda y: special.i1(A*np.sqrt(1.-y**2))/(A*np.sqrt(1.-y**2)), 0, x_i)  
+            n_arr[i] = np.sqrt(ni*ns) * np.exp(Gamma * A**2 * phi_int[0])
+        return n_arr,z_arr,z_space
+    
+    def fit_oblique_basic_multilayer_r_t_incloss(self, n, losstan, d, freq_in, angle_i, incpol):
+        '''
+        * Def name
+            fit_oblique_basic_multilayer_r_t_incloss
+        * Description
+            Calculate coefficient of reflectance and transmittance based on Transfer matrix method, made by Tomo Matsumura
+            (modified with this class by RTakaku)
+        * input parameters
+            - n:  refractive index of substrate
+            - losstan: loss tangent of substrate
+            - d: thickness [m] 
+            - freq_in: input frequency [Hz]
+            - angle_i: incident angle [rad]
+            - incpol: 1 for s-state, E field perpendicular to the plane of incidnet, -1 for P-state, E in the plane of incident
+
+        * return
+            - output ([0]: freq, [1]: coeff of reflectance, [2]: coeff of transmittance (complex numpy array))
+        '''
+        num=len(d) #; the number of layer not including two ends
+        const = np.sqrt((self.ep0)/(4.*self.pi*1e-7)) #SI unit sqrt(dielectric const/permiability)
+
+        # ;-----------------------------------------------------------------------------------
+        # ; angle of refraction
+        angle = np.zeros(num+2)          # ; angle[0]=incident angle
+        angle[0] = angle_i
+        for i in range(0,num+1): angle[i+1] = np.arcsin(np.sin(angle[i])*n[i]/n[i+1])
+
+        # ;-----------------------------------------------------------------------------------
+        # ; define the frequency span
+        l = len(freq_in)
+        output = np.zeros((3,l),'complex') # output = dcomplexarr(3,l)
+
+        # ;-----------------------------------------------------------------------------------
+        # ; define the effective thickness of each layer
+        h = np.zeros(num,'complex')
+        n_comparr = np.zeros(len(n),'complex')
+        n_comparr[0] = complex(n[0], -0.5*n[0]*losstan[0])
+        n_comparr[num+1] = complex(n[num+1], -0.5*n[num+1]*losstan[num+1])
+
+        # ;-----------------------------------------------------------------------------------
+        # ; for loop for various thickness of air gap between each layer
+        for j in range(0,l):
+            for i in range(0,num): 
+                n_comparr[i+1] = complex(n[i+1], -0.5*n[i+1]*losstan[i+1])
+                h[i] = n_comparr[i+1]*d[i]*np.cos(angle[i+1]) # ;effective thickness of 1st layer
+
+            freq = freq_in[j]
+            k = 2.*self.pi*freq/self.c
+
+            # ;===========================================
+            # ; Y: Y[0]=vacuum, Y[1]=1st layer..., Y[num+1]=end side
+            Y = np.zeros(num+2,'complex')
+            for i in range(0,num+2):
+                if (incpol == 1):
+                    Y[i] = const*n_comparr[i]*np.cos(angle[i])
+                    cc = 1.
+                if (incpol == -1):
+                    Y[i] = const*n_comparr[i]/np.cos(angle[i])
+                    cc = np.cos(angle[num+1])/np.cos(angle[0])
+
+            # ;===========================================
+            # ; define matrix for single layer
+            m = np.identity((2),'complex')    # ; net matrix
+            me = np.zeros((2,2),'complex') # ; me[0]=1st layer, ...
+            for i in range(0,num):
+                me[0,0] = complex(np.cos(k*h[i]), 0.)
+                me[1,0] = complex(0., np.sin(k*h[i])/Y[i+1])
+                me[0,1] = complex(0., np.sin(k*h[i])*Y[i+1])
+                me[1,1] = complex(np.cos(k*h[i]), 0.)
+                m = np.dot(m,me)
+
+            r = (Y[0]*m[0,0]*cc+Y[0]*Y[num+1]*m[1,0]-m[0,1]*cc-Y[num+1]*m[1,1]) / (Y[0]*m[0,0]*cc+Y[0]*Y[num+1]*m[1,0]+m[0,1]*cc+Y[num+1]*m[1,1])
+            t = 2.*Y[0] / (Y[0]*m[0,0]*cc+Y[0]*Y[num+1]*m[1,0]+m[0,1]*cc+Y[num+1]*m[1,1])
+
+            output[0,j] = freq+0.j #; unit of [Hz]
+            output[1,j] = r
+            output[2,j] = t
+
+        return output
+    
+    def Brauer_emt_anti_symmetric(self,freq,n1,n2,f1,f2,p1,p2):
+        '''
+        * Def name
+            Brauer_emt_anti_symmetric
+        * Description
+            Calculate effective refractive index given area fraction
+            Based on Brauer(1994): https://opg.optica.org/view_article.cfm?pdfKey=92654043-e0c1-4520-98b312f00908c33d_42237
+        * input parameters
+            - freq:   inpu frequency [Hz]
+            - n1: refractive index of air, so 1.0
+            - n2: refractive index of substrate
+            - f1: area fraction along x axis
+            - f2: area fraction along y axis
+            - p1: pitch x
+            - p2: pitch y
+
+        * return
+            - n_: 0th ordered effective refractive index
+            - neff: 2nd ordered effective refractive index
+        '''
+        
+        lamda = self.c/freq   # wavelength
+        f = (f1+f2)/2.        # average fraction in x and y
+
+        e1 = n1**2.*self.ep0  # refractive index --> permitivity (air) 
+        e2 = n2**2.*self.ep0  # refractive index --> permitivity (substrate)
+
+        ell_0 = (1.0 - f1)*e1+f1*e2    # Eq.1
+        els_0 = 1./((1.-f2)/e1+f2/e2)  # Eq.2
+
+        ell_2 = ell_0*(1.+(np.pi**2/3.)*(p1/lamda)**2.*f1**2*(1.-f1)**2.*((e2-e1)**2./(self.ep0*ell_0)))                    # Eq.3
+        els_2 = els_0*(1.0+(np.pi)**2/3.0*(p2/lamda)**2*f2**2*(1.-f2)**2.*((e2-e1)**2.)*ell_0/self.ep0*(els_0/(e2*e1))**2.) # Eq.4
+        
+        e_2nd_up = (1.0 - f1)*e1 + f1*els_2           # Eq.6
+        e_2nd_down = 1./((1.0 - f2)/e1 + f2/ell_2)    # Eq.7
+
+        n_=(1-f**2)*n1+f**2*n2                        # Eq.5
+        n__2nd_up = np.sqrt(e_2nd_up/(self.ep0))      # permitivity --> refractive index (up)
+        n__2nd_down = np.sqrt(e_2nd_down/(self.ep0))  # permitivity --> refractive index (down)
+
+        neff = 0.2*(n_+2.0*n__2nd_up+2.0*n__2nd_down) # Eq.8
+        return n_*np.ones(len(neff)),neff
+    
+    def Calculate_transmittance_include_Klopfenstein_profile_on_both_sides(self,freq, input_n,input_losstan,input_d, h, z_res, Gamma,Plot_klop_profile = False):
+        # ==========================
+        # Calculate Klopfenstein index profile and its transmission
+        # - - - - - - - - - - - - - - -
+        n_arr, z_klop, d_klop = self.Klopfenstein(h,z_res,1.0,input_n,Gamma) # n, z, thickness each layer
+        
+        if Plot_klop_profile == True:
+            fig = plt.figure(figsize = (6,4))
+            ax = fig.add_subplot(111)
+            ax.plot(n_arr,z_klop[::-1]*1e+3, 'r',label = r'$\Gamma_m = %.3f$'%Gamma)
+            ax.grid()
+            ax.set_xlabel('Effective refractive index',fontsize = 15)
+            ax.set_ylabel('Height [mm]', fontsize = 15)
+            ax.legend()
+            fig.tight_layout()
+            plt.show()
+            plt.close()
+        n_klop = np.concatenate((np.array([1.0]),n_arr))                       # just add air layer (incident environment) to n_arr, which is exactly Klopfenstein index profile
+        thickness_for_klop = np.concatenate((d_klop,np.array([input_d]),d_klop))   # thickness array ( Klopfesntein array (N of layer) + substrate + Klopfesntein array (N of layer) )   
+        index_for_klop = np.concatenate((n_klop,np.array([input_n]),n_klop[::-1])) # refractive index array ( air + Klopfesntein array (N of layer) + substrate + Klopfesntein array (N of layer) + air)
+        losstan_for_klop = np.concatenate((np.ones(len(n_klop))*input_losstan,np.array([input_losstan]),np.ones(len(n_klop))*input_losstan)) 
+                                                                                   # loss tangent array ( air + Klopfesntein array (N of layer) + substrate + Klopfesntein array (N of layer) + air)
+
+        trans_klop = abs(self.fit_oblique_basic_multilayer_r_t_incloss(index_for_klop, losstan_for_klop, thickness_for_klop,freq,angle_i=0, incpol=1)[2])**2 
+                                                                                   # This indicates |trans. coeff|**2
+        
+        # Now, we have n_klop(Klopfenstein index profile), and trans_klop (Transmission based on Klofenstein ARC)
+        # - - - - - - - - - - - - - - -
+        # ==========================
+        return n_arr, z_klop, trans_klop
+    
+    def Find_bandwidth(self,vc,fc):
+        diff = vc*fc/2
+        
+        band_low = vc - diff
+        band_high = vc + diff
+        
+        res = np.transpose(np.array([band_low,band_high]))
+        
+        return res
+    
+    def Calculate_band_average(self,freq,trans,band):
+        band_num = len(band)
+        ave_arr = np.empty(band_num)
+        
+        for i in range(0,band_num):
+            freq_ind = np.where((freq>=band[i][0])&(freq<=band[i][1]))
+            ave_arr[i] = np.average(trans[freq_ind])
+        return ave_arr
+    
+    def Plot_transmittance_EMT(self,freq,trans,trans_ave,band,center_freq):
+        fig = plt.figure(figsize = (6,4))
+        ax = fig.add_subplot(111)
+        
+        ax.plot(freq*1e-9,trans, 'r')
+        
+        ax.set_xlabel('Frequency [GHz]',fontsize = 15)
+        ax.set_ylabel('Transmittance',fontsize = 15)
+        
+        ax.grid(True)
+        y_minimum = 0.9
+        ax.set_ylim(y_minimum,1.02)
+        
+        for i in range(0,len(center_freq)):
+            ax.fill_between(band[i]*1e-9,y1 = np.ones(2)*0, y2 = np.ones(2)*3, color = 'r', alpha = 0.2)
+            ax.text(center_freq[i]*1e-9,y_minimum+0.01,r'$T_{ave}= $%.3f'%trans_ave[i],ha = 'center',va = 'top')
+        
+        fig.tight_layout()
+        plt.show()
+        plt.close()
+        
+    def Find_width(self,arr, n0, ns, vc, p):
+        area_frac_arr = np.linspace(0,1.0,10001)
+        n_eff_arr = self.Brauer_emt_anti_symmetric(vc,n0,ns,area_frac_arr,area_frac_arr,p,p)
+        
+        w = np.zeros(len(arr))
+        for i in range(0,len(w)):
+            w[i] = p*area_frac_arr[np.argmin(abs(arr[i] - n_eff_arr[1]))]
+        return w
+    
+    def Plot_cross_section(self,width_arr,klop_d,p):
+        width_for_plot = np.concatenate((-width_arr[::-1]/2-p,width_arr/2-p,-width_arr[::-1]/2,width_arr/2,-width_arr[::-1]/2+p,width_arr/2+p))*1e+3
+        depth_for_plot = np.concatenate((klop_d[::-1],klop_d,klop_d[::-1],klop_d,klop_d[::-1],klop_d))*1e+3
+        
+        
+        fig = plt.figure(figsize = (6,4))
+        ax = fig.add_subplot(111)
+
+        ax.plot(width_for_plot, depth_for_plot,'b-', label = 'Design')
+        
+
+        ax.set_ylim(np.max(depth_for_plot) + np.max(depth_for_plot)*0.05,-0.05)
+        ax.set_xlabel('Length [mm]',fontsize = 12)
+        ax.set_ylabel('Depth [mm]',fontsize = 12)
+        ax.grid()
+        fig.tight_layout()
+        plt.show()
+        plt.close()
+        
+    def SuperEllipse_hone(self,h_arr,rx_arr,ry_arr,nx_arr,ny_arr,p2, p_int, Plot = False):
+        # ==========================
+        # Create 3D model of super ellipse based SWS
+        # - - - - - - - - - - - - - - -                
+        
+        Z = np.ones([p_int,p_int])*h_arr[0]  # set depth map (zeros)[mm]
+        y,x = np.linspace(-p2,p2,p_int), np.linspace(-p2,p2,p_int) # set 1D x and y array [mm]
+        Y,X = np.meshgrid(y,x)                                     # set 2D x and y pixel map [mm]
+        pix_size = x[1] -x[0]                                      # pixel size [mm]
+                
+        #  ~~ Create 3D model of super ellipse ~~
+        for ind in tqdm(range(0,len(h_arr)),desc = 'SWS contour...'):            
+            where_ind = np.where(abs(X/rx_arr[ind])**(nx_arr[ind]) + abs(Y/ry_arr[ind])**(ny_arr[ind]) <= 1)
+            Z[where_ind] = h_arr[ind]
+            
+        Z_off = -(Z - np.max(h_arr))
+        
+        if Plot == True:
+            fig = plt.figure(figsize = (6,6))
+            ax = fig.add_subplot(111)
+            ax.set_aspect('equal')
+            ax.contour(X*1e+3,Y*1e+3,Z_off*1e+3,cmap = 'jet_r')
+            ax.tick_params(labelsize = 12)
+            ax.set_xlabel('$x$ [mm]',fontsize = 15)
+            ax.set_ylabel('$y$ [mm]',fontsize = 15)
+            cm = ax.pcolormesh(X*1e+3,Y*1e+3,Z_off*1e+3,cmap = 'jet_r',alpha = 0.8)
+            fig.colorbar(cm,shrink = 0.7,label= 'Height [mm]')
+            fig.tight_layout()
+                    
+        return X,Y,Z_off
+    
+    
+    def Datwrite(self,fname,m,z_res):
+        '''
+        * Def name
+            Datwrite
+        * Description
+            Create 3D index array for RCWA calculation consisting of [0,1]
+        * input parameters
+            - fname: file name for .dat
+            - m: 3D shape of SWS
+        * return
+            - 
+        '''
+        f = open('./Data/'+fname+'.dat','w') # file open
+        
+        # ==========================
+        # Header for RCWA
+        # - - - - - - - - - - - - - - - 
+        f.write('/rn,a,b/nx0\n')
+        f.write('/r,qa,qb\n')
+        f.write('/r\n')
+        f.write(str(len(m[0])) + ' -1 1 Z_DEPENDENT OUTPUT_REAL_3D\n')
+        f.write(str(len(m)) + ' -1 1\n')
+        f.write(str(z_res) + ' 0 1\n') 
+        # - - - - - - - - - - - - - - - 
+        # ==========================
+        
+        z_max = np.max(m)   # find maximum m
+        z_min = np.min(m)   # find minimum m
+        dz = (z_max-z_min)/float(z_res)        # calculate thickness of each layer
+
+        # ==========================
+        # find substrate area for each layer
+        # - - - - - - - - - - - - - - - 
+        for k in tqdm(range(z_res),desc = 'RCWA input...'):  
+            for i in range(len(m[0])):
+                for j in range(len(m)):
+                    if( m[j][i] <= z_max - (float(k)+0.5)*dz ):
+                        f.write('0.0 ')
+                    else:
+                        f.write('1.0 ')
+                f.write('\n')
+        f.close()
+        # - - - - - - - - - - - - - - - 
+        # ==========================        
+        
+        
+class VK4_Lib:
+    def getscale(self):
+        with open(self.fpas, 'rb') as f:
+            header = f.read(264)
+        XY = int(binascii.hexlify(header[252:256][::-1]),16)/1e9
+        Z = int(binascii.hexlify(header[260:264][::-1]),16)/1e9
+        return XY, Z
+
+    def heightviewer(self):
+        with open(self.fpas, 'rb') as f:
+            header = f.read(40)
+        with open(self.fpas, 'rb') as f:
+            offset = int(binascii.hexlify(header[36:40][::-1]),16)
+            f.seek(offset)
+            pre_data = f.read(28)
+            width = int(binascii.hexlify(pre_data[0:4][::-1]),16)
+            height = int(binascii.hexlify(pre_data[4:8][::-1]),16)
+            databytes = int(int(binascii.hexlify(pre_data[8:12][::-1]),16)/8)
+            totlength = int(binascii.hexlify(pre_data[16:20][::-1]),16)
+            LZWtable = f.read(256*3)
+            data = f.read(width*height*databytes)
+        data_array = np.empty(width*height)
+        for i in range(width*height):
+            data_array[i] = int(binascii.hexlify(data[i*databytes:(i+1)*databytes][::-1]),16)
+        image = np.reshape(data_array,(height,width))
+        return image    
+    
+class Shape_evaluation(VK4_Lib):
+    def __init__(self,dir,fname,offx,offy,tx,ty,ex,ey):
+        self.fs = 15
+        self.pas = './'
+        self.date = dir
+        self.fname = fname
+        self.fpas = self.pas+self.date+'/'+self.fname+'.vk4'
+        self.xy_cal = self.getscale()[0]
+        self.Z_cal = self.getscale()[1]
+        print('Z_cal = ',self.Z_cal)
+        print('xy_cal = ',self.xy_cal)
+        self.m = self.heightviewer()
+        self.m = (self.m - np.max(self.m))*1e-7
+        
+        self.m = self.m[tx:ex,ty:ey]
+        self.x_com = len(self.m[0])
+        self.y_com = len(self.m)
+
+        self.x = np.linspace(0,self.x_com*self.xy_cal,self.x_com)
+        self.y = np.linspace(0,self.y_com*self.xy_cal,self.y_com)
+    
+        self.X,self.Y = np.meshgrid(self.x,self.y)
+        
+        self.theta = np.linspace(0,np.pi*2,1001)
+
+    
+    def Find_one_structure(self,p,cuty,cutx):
+        """
+        Find one structures by finding minimum location of the groove
+        Input parameters:
+            p: pitch of the structures [mm]
+            cuty: initial cut in y (int)
+            cutx: initial cut in x (int)
+        Return m_cut: one structure (2-D numpy array)
+        """
+        p_int = int(p/self.xy_cal) # calculate index number for the actual pitch
+        
+        m_cuty = self.m[cuty:cuty+p_int]   # m cut in y direction 
+        m_cutx = self.m[:,cutx:cutx+p_int] # m cut in x direction
+        
+        locy = int(np.mean(np.argmin(m_cuty,axis = 0))) # avarage minimum location in y
+        locx = int(np.mean(np.argmin(m_cutx,axis = 1))) # average minimum location in x
+        
+        m_cut = self.m[locy:locy+p_int,locx:locx+p_int] # m one structure
+        return m_cut
+    
+    def Find_contour(self,m_cut,z_pos,p):
+        m_cont = np.where(m_cut>=z_pos)
+        # number of pixel for one structure pitch
+        p_int = int(p/self.xy_cal)
+        
+        img = np.zeros((len(m_cut),len(m_cut[0])))
+        img = img.astype(np.uint8)
+
+        img[m_cont[0],m_cont[1]]=255
+
+        contours, hierarchy = cv2.findContours(img, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        
+        cont_arr = np.empty(len(contours),dtype = int)
+        for i in range(len(contours)):
+            cont_arr[i] = len(contours[i])
+        #print('Contours array =', cont_arr)
+        cont_num = np.argmax(cont_arr)
+        #print('SWS contour number = ',cont_num)
+        
+        arr = np.array(contours[cont_num])[:,0]
+
+        x_box = np.linspace(-p/2,p/2,p_int)
+        y_box = np.linspace(-p/2,p/2,p_int)
+        x_data = x_box[arr[:,0]]
+        y_data = y_box[arr[:,1]]
+        
+        return x_data,y_data
+
+    def Fit_contours(self,x_data,y_data,p):
+        def func(data,rx,ry,nx,ny,offx,offy):
+            x,y = data
+            return (np.absolute(x-offx)/rx)**nx + (np.absolute(y-offy)/ry)**ny
+
+        rx_init = (np.max(x_data)-np.min(x_data))/2
+        ry_init = (np.max(y_data)-np.min(y_data))/2
+        nx_init = 3
+        ny_init = 3
+        offx_init = (np.max(x_data)+np.min(x_data))/2
+        offy_init = (np.max(y_data)+np.min(y_data))/2
+
+        #print(rx_init,ry_init,offx_init,offy_init)
+        bounds_arr = ((rx_init*0.001,ry_init*0.001,2.0,2.0,-p/10,-p/10),(p/2,p/2,500,500,p/10,p/10))
+        
+        popt,pcov = curve_fit(func,(x_data,y_data),
+                              np.ones(len(x_data)),
+                              p0=[rx_init,ry_init,nx_init,ny_init,offx_init,offy_init],
+                              bounds=bounds_arr)
+        
+        lib1 = Gen_SuperEllipse()
+        x,y = lib1.Contour_SuperEllipse(popt[0],popt[1],popt[2],popt[3])
+        
+        return popt,x+popt[4], y+popt[5]
+    
+    def Output_fitted_parameters(self,m_cut,z_pos_arr,p, nonoff,sname):
+
+        rx_fit = np.empty(len(z_pos_arr)-1)
+        ry_fit = np.empty(len(z_pos_arr)-1)
+        nx_fit = np.empty(len(z_pos_arr)-1)
+        ny_fit = np.empty(len(z_pos_arr)-1)
+        offx_fit = np.empty(len(z_pos_arr)-1)
+        offy_fit = np.empty(len(z_pos_arr)-1)
+
+        x_data_arr = []
+        y_data_arr = []
+
+        x_fit_arr = np.empty((len(z_pos_arr)-1,1001))
+        y_fit_arr = np.empty((len(z_pos_arr)-1,1001))
+
+        for zi in range(0,len(z_pos_arr)):
+            x_data,y_data = self.Find_contour(m_cut,z_pos_arr[zi],p)
+            popt,x_fit,y_fit = self.Fit_contours(x_data,y_data,p)
+
+            x_data_arr.append(x_data)
+            y_data_arr.append(y_data)
+            rx_fit[zi-1] = popt[0]
+            ry_fit[zi-1] = popt[1]
+            nx_fit[zi-1] = popt[2]
+            ny_fit[zi-1] = popt[3]
+            offx_fit[zi-1] = popt[4]
+            offy_fit[zi-1] = popt[5]
+
+            x_fit_arr[zi-1] = x_fit
+            y_fit_arr[zi-1] = y_fit
+
+
+        fig = plt.figure(figsize = (12,8))
+        gs = GridSpec(3,4)
+
+        ss1 = gs.new_subplotspec((0,0),rowspan = 2,colspan = 2)  # contour
+        ss2 = gs.new_subplotspec((0,2),colspan = 2)              # radius (taper)
+        ss3 = gs.new_subplotspec((1,2),colspan = 2)              # index (taper)
+        ss4 = gs.new_subplotspec((2,2),colspan = 2)              # index (taper)
+
+        ax1 = plt.subplot(ss1) # contour
+        ax2 = plt.subplot(ss2) # radius (taper)
+        ax3 = plt.subplot(ss3) # index (taper)# color gradation
+        ax4 = plt.subplot(ss4) # index (taper)# color gradation
+
+
+        for i in range(1,len(x_data_arr),13):
+            ax1.plot(x_data_arr[i],y_data_arr[i],'.',color = cm.jet_r(i/len(x_data_arr)), markersize = 2)
+        for j in range(1,len(x_fit_arr),13):
+            ax1.plot(x_fit_arr[j],y_fit_arr[j],color = cm.jet_r(j/len(x_fit_arr)),alpha = 0.7)
+
+        ax1.grid(True)
+        ax1.set_xlabel('x [mm]',fontsize = 14)
+        ax1.set_ylabel('y [mm]', fontsize = 14)
+        ax1.set_aspect(True)
+        ax1.tick_params(labelsize = 12)
+
+        ax2.plot(z_pos_arr[1+nonoff:]*(-1),rx_fit[nonoff:],'r-',label = r'$r_x$')
+        ax2.plot(z_pos_arr[1+nonoff:]*(-1),ry_fit[nonoff:],'b-',label = r'$r_y$')
+        ax2.set_xlabel('Depth [mm]',fontsize = 14)
+        ax2.set_ylabel('Radians [mm]',fontsize = 14)
+        ax2.set_ylim(0.0,p/2*1.1)
+        ax2.tick_params(labelsize = 12)
+        ax2.grid(True)
+        ax2.legend()
+
+
+        ax3.set_yscale('log')
+        ax3.plot(z_pos_arr[1+nonoff:]*(-1),nx_fit[nonoff:],'r-',label = r'$n_x$')
+        ax3.plot(z_pos_arr[1+nonoff:]*(-1),ny_fit[nonoff:],'b-',label = r'$n_y$')
+        ax3.set_xlabel('Depth [mm]',fontsize = 14)
+        ax3.set_ylabel('Index [mm]',fontsize = 14)
+        ax3.tick_params(labelsize = 12)
+        ax3.grid(True)
+        ax3.legend()
+
+
+        ax4.plot(z_pos_arr[1+nonoff:]*(-1),offx_fit[nonoff:],'r-',label = r'$offset_x$')
+        ax4.plot(z_pos_arr[1+nonoff:]*(-1),offy_fit[nonoff:],'b-',label = r'$offset_y$')
+        ax4.set_xlabel('Depth [mm]',fontsize = 14)
+        ax4.set_ylabel('Offset [mm]',fontsize = 14)
+        ax4.tick_params(labelsize = 12)
+        ax4.grid(True)
+        ax4.legend()
+
+        fig.tight_layout()
+        plt.savefig('./Figure/'+sname+'_fit_sum.png',dpi = 300)
+        plt.show()
+        plt.close()
+        
+        
+        X,Y,Z = self.SuperEllipse_hone(z_pos_arr[:-(1+nonoff)],
+                              rx_fit[::-1][nonoff:],
+                              ry_fit[::-1][nonoff:],
+                              nx_fit[::-1][nonoff:],
+                              ny_fit[::-1][nonoff:],
+                              offx_fit[::-1][nonoff:],
+                              offy_fit[::-1][nonoff:],p/2)
+        return X,Y,Z
+        
+    
+    def SuperEllipse_hone(self,h_arr,rx_arr,ry_arr,nx_arr,ny_arr,offx,offy,p2):
+        # ==========================
+        # Create 3D model of super ellipse based SWS
+        # - - - - - - - - - - - - - - -        
+        p_int = int(p2*2/self.xy_cal)
+        
+        
+        Z = np.ones([p_int,p_int])*h_arr[0]  # set depth map (zeros)[mm]
+        y,x = np.linspace(-p2,p2,p_int), np.linspace(-p2,p2,p_int) # set 1D x and y array [mm]
+        Y,X = np.meshgrid(y,x)                                     # set 2D x and y pixel map [mm]
+        pix_size = x[1] -x[0]                                      # pixel size [mm]
+                
+        #  ~~ Create 3D model of super ellipse ~~
+        for ind in tqdm(range(0,len(h_arr)),desc = 'SWS contour...'):            
+            where_ind = np.where(abs((X - offx[ind])/rx_arr[ind])**(nx_arr[ind]) + abs((Y - offy[ind])/ry_arr[ind])**(ny_arr[ind]) <= 1)
+            Z[where_ind] = h_arr[ind]
+                    
+        return X,Y,Z  
+    
+    
+    def Datwrite(self,fname,m,z_res):
+        '''
+        * Def name
+            Datwrite
+        * Description
+            Create 3D index array for RCWA calculation consisting of [0,1]
+        * input parameters
+            - fname: file name for .dat
+            - m: 3D shape of SWS
+        * return
+            - 
+        '''
+        f = open('./Data/'+fname+'.dat','w') # file open
+        
+        # ==========================
+        # Header for RCWA
+        # - - - - - - - - - - - - - - - 
+        f.write('/rn,a,b/nx0\n')
+        f.write('/r,qa,qb\n')
+        f.write('/r\n')
+        f.write(str(len(m[0])) + ' -1 1 Z_DEPENDENT OUTPUT_REAL_3D\n')
+        f.write(str(len(m)) + ' -1 1\n')
+        f.write(str(z_res) + ' 0 1\n') 
+        # - - - - - - - - - - - - - - - 
+        # ==========================
+        
+        z_max = np.max(m)   # find maximum m
+        z_min = np.min(m)   # find minimum m
+        dz = (z_max-z_min)/float(z_res)        # calculate thickness of each layer
+
+        # ==========================
+        # find substrate area for each layer
+        # - - - - - - - - - - - - - - - 
+        for k in tqdm(range(z_res),desc = 'RCWA input...'):  
+            for i in range(len(m[0])):
+                for j in range(len(m)):
+                    if( m[j][i] <= z_max - (float(k)+0.5)*dz ):
+                        f.write('0.0 ')
+                    else:
+                        f.write('1.0 ')
+                f.write('\n')
+        f.close()
+        # - - - - - - - - - - - - - - - 
+        # ==========================
         
 
 
